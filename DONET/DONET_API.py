@@ -8,12 +8,12 @@ from torch import load as torch_load, save
 from .Utils import build_dir
 from .Preprocessing import preprocess
 from .Data_Infrastructure.DataLoader_Constructor import build_dataloaders
-from .Network.scTEL import scTEL_Model
+from .Network.DONET import DONET_Model
 from .Network.Losses import cross_entropy, sse_quantile, no_loss
 
 
 
-class scTEL_API(object):
+class DONET_API(object):
     def __init__(self, gene_trainsets, protein_trainsets, gene_test=None, gene_list=[], select_hvg=True,
                  train_batchkeys=None, test_batchkey=None, type_key=None, cell_normalize=True, log_normalize=True,
                  gene_normalize=True, min_cells=30, min_genes=200,
@@ -82,7 +82,7 @@ class scTEL_API(object):
         self.model.to(self.device)
 
         build_dir(weights_dir)
-        path = weights_dir + "/scTEL_Weights"
+        path = weights_dir + "/doNET_Weights"
 
         if load and isfile(path):
             self.model.load_state_dict(torch_load(path))

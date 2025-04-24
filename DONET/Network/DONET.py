@@ -9,7 +9,7 @@ from torch.optim.lr_scheduler import StepLR
 from .TE_Layer import Input_TE, FF_TE, LambdaLayer, Dual_Forward, Protein_Linear
 
 
-class scTEL_Model(Module):
+class DONET_Model(Module):
     def __init__(self, p_mod1, p_mod2, h_size, h, loss1, loss2, quantiles, categories, drop_rate=0.2):
         # p_mod1: HVGs p_mod2:ref_proteins
         super(scTEL_Model, self).__init__()

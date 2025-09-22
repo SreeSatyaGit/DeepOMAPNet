@@ -1,3 +1,7 @@
+import torch
+import torch.nn.functional as F
+from torch_geometric.nn import GATConv
+
 class SimpleGAT(torch.nn.Module):
     """Simplified GAT for memory-constrained scenarios"""
     def __init__(self, in_channels, hidden_channels, out_channels, heads=4, dropout=0.6):

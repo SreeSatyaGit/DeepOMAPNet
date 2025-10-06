@@ -121,23 +121,3 @@ sc.pp.neighbors(adata)
 pyg_data = build_pyg_data(adata, use_pca=True)
 ```
 
-## Migration Guide
-
-If you have existing code that imports from the old structure, update your imports:
-
-### Old imports (deprecated):
-```python
-from scripts.GATmodel import SimpleGAT
-from scripts.TransformerMap import TransformerMapping
-from scripts.Embeddings_extract import build_pyg_data
-from scripts.Predictions import ADTPredictor
-```
-
-### New imports (current):
-```python
-from scripts.model.gat_models import SimpleGAT
-from scripts.model.transformer_models import TransformerMapping
-from scripts.data_provider.graph_data_builder import build_pyg_data
-from scripts.trainer.adt_predictor import ADTPredictor
-```
-

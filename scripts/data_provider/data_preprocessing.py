@@ -4,7 +4,6 @@ import numpy as np
 from typing import Dict, Tuple
 import anndata
 
-
 def prepare_train_test_anndata(
     GSM_Controls_RNA=sc.read_h5ad("/projects/vanaja_lab/satya/Datasets/GSMControlRNA.h5ad"),
     GSM_Controls_ADT=sc.read_h5ad("/projects/vanaja_lab/satya/Datasets/ControlADT.h5ad"),
@@ -13,7 +12,6 @@ def prepare_train_test_anndata(
     GSM_AML_RNA_B=sc.read_h5ad("/projects/vanaja_lab/satya/Datasets/AMLBRNA.h5ad"),
     GSM_AML_ADT_B=sc.read_h5ad("/projects/vanaja_lab/satya/Datasets/AMLBADT.h5ad"),
 ):
-    # Concatenate gene data
     adata_gene = anndata.concat(
         [GSM_AML_RNA_B, GSM_AML_RNA_A, GSM_Controls_RNA],
         join="outer",
@@ -21,7 +19,6 @@ def prepare_train_test_anndata(
         keys=["GSM_AML_RNA_B", "GSM_AML_RNA_A", "GSM_Controls_RNA"],
     )
 
-    # Concatenate protein data
     adata_protein = anndata.concat(
         [GSM_Controls_ADT, GSM_AML_ADT_A, GSM_AML_ADT_B],
         join="outer",
@@ -29,21 +26,17 @@ def prepare_train_test_anndata(
         keys=["GSM_Controls_ADT", "GSM_AML_ADT_A", "GSM_AML_ADT_B"],
     )
 
-    # Inspect sample IDs in the gene data
     print("All sample IDs in gene data:", adata_gene.obs["samples"].unique())
 
     samples = list(adata_gene.obs["samples"].unique())
 
-    # Separate into AML and Control
     aml_samples = [s for s in samples if s.startswith("AML")]
     control_samples = [s for s in samples if s.startswith("Control")]
 
-    # Shuffle for random split
-    np.random.seed(42)  # for reproducibility
+    np.random.seed(42)
     aml_samples = np.random.permutation(aml_samples)
     control_samples = np.random.permutation(control_samples)
 
-    # Calculate split indices
     def split_indices(n, frac=0.8):
         split_at = int(np.ceil(frac * n))
         return split_at
@@ -61,20 +54,16 @@ def prepare_train_test_anndata(
     print("Control 80% train:", control_train)
     print("Control 20% test:", control_test)
 
-    # Define your training samples exactly as they appear
     train_samples = aml_train + control_train
 
-    # Build a boolean mask for training cells based on 'samples'
     train_mask_gene = adata_gene.obs["samples"].isin(train_samples)
     train_mask_protein = adata_protein.obs["samples"].isin(train_samples)
 
-    # Subset the gene and protein AnnData objects for training and test sets
     adata_gene_train = adata_gene[train_mask_gene].copy()
     adata_protein_train = adata_protein[train_mask_protein].copy()
     adata_gene_test = adata_gene[~train_mask_gene].copy()
     adata_protein_test = adata_protein[~train_mask_protein].copy()
 
-    # For both training and test sets, align cell IDs by taking the intersection and sorting
     def align_obs(gene_data, protein_data):
         common_cells = sorted(
             set(gene_data.obs_names).intersection(set(protein_data.obs_names))
@@ -95,7 +84,6 @@ def prepare_train_test_anndata(
 
     print("Train cells:", adata_gene_train.n_obs, "| Test cells:", adata_gene_test.n_obs)
 
-    # Convert data matrices to float32 if needed
     adata_gene_train.X = adata_gene_train.X.astype("float32")
     adata_gene_test.X = adata_gene_test.X.astype("float32")
     adata_protein_train.X = adata_protein_train.X.astype("float32")

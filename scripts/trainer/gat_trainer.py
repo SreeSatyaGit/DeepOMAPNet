@@ -1,29 +1,29 @@
 import torch
 import numpy as np
 from sklearn.model_selection import StratifiedShuffleSplit
-from scripts.GATmodel import SimpleGAT, GAT
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+
+from model.gat_models import SimpleGAT, GAT
 
 def train_gat_model(data, model_name="GAT", epochs=200, use_cpu_fallback=False, seed=42):
     """Train a GAT model and return the trained model"""
-    # Reproducibility
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    # Ensure label dtype is correct for CrossEntropyLoss
     if data.y.dtype != torch.long:
         data.y = data.y.long()
 
     device = torch.device('cuda' if torch.cuda.is_available() and not use_cpu_fallback else 'cpu')
     print(f"Using device: {device}")
 
-    # Graph stats
     num_edges = getattr(data, "num_edges", None)
     num_nodes = getattr(data, "num_nodes", None)
     if num_edges is None or num_nodes is None:
         raise ValueError("`data` must have num_edges and num_nodes attributes.")
     print(f"Graph stats - Nodes: {num_nodes}, Edges: {num_edges}")
 
-    # Model size heuristic
     use_simple_model = False
     if num_edges > 2_000_000:
         print("Very large graph detected, using simplified GAT architecture...")
@@ -35,12 +35,9 @@ def train_gat_model(data, model_name="GAT", epochs=200, use_cpu_fallback=False, 
     else:
         hidden_dim, heads = 64, 8
 
-    # Masks (80/10/10 stratified)
     N = data.num_nodes
     y_np = data.y.cpu().numpy()
 
-    # Guard: ensure labels are suitable for stratification
-    # (at least 2 samples per class recommended for a single split)
     _, class_counts = np.unique(y_np, return_counts=True)
     if (class_counts < 2).any():
         raise ValueError(
@@ -68,9 +65,7 @@ def train_gat_model(data, model_name="GAT", epochs=200, use_cpu_fallback=False, 
     data.val_mask = val_mask
     data.test_mask = test_mask
 
-    # Model
     in_dim = data.x.size(1)
-    # Safer class count
     n_class = int(torch.unique(data.y).numel())
 
     if use_simple_model:
@@ -80,7 +75,6 @@ def train_gat_model(data, model_name="GAT", epochs=200, use_cpu_fallback=False, 
         model = GAT(in_dim, hidden_dim, n_class, heads=heads).to(device)
         print(f"Using GAT: {in_dim} -> {hidden_dim} -> {n_class} (heads: {heads})")
 
-    # Move data to device
     cpu_fallback_triggered = False
     try:
         data = data.to(device)

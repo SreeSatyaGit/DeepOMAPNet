@@ -62,11 +62,19 @@ class ADTPredictor:
         Returns:
             tuple: (rna_gat_model, adt_gat_model, transformer_model, checkpoint_info)
         """
-        if individual_models_dir and os.path.exists(individual_models_dir):
-            return self._load_individual_models(individual_models_dir)
+        if individual_models_dir and os.path.exists(individual_models_dir.strip()):
+            return self._load_individual_models(individual_models_dir.strip())
 
         if checkpoint_path is None:
             possible_paths = [
+                # Latest models from your training
+                "/projects/vanaja_lab/satya/DeepOMAPNet/Notebooks/trained_models/rna_adt_transformer_models_20251006_130642.pth",
+                "/projects/vanaja_lab/satya/DeepOMAPNet/Notebooks/trained_models/rna_adt_transformer_models_20251006_130513.pth",
+                "/projects/vanaja_lab/satya/DeepOMAPNet/Notebooks/trained_models/rna_adt_transformer_models_20251006_130438.pth",
+                "/projects/vanaja_lab/satya/DeepOMAPNet/Notebooks/trained_models/individual_models_20251006_130642",
+                "/projects/vanaja_lab/satya/DeepOMAPNet/Notebooks/trained_models/individual_models_20251006_130513",
+                "/projects/vanaja_lab/satya/DeepOMAPNet/Notebooks/trained_models/individual_models_20251006_130438",
+                # Legacy paths
                 "trained_models/rna_adt_transformer_models_20250922_115253.pth",
                 "rna_adt_transformer_mapping_models.pth",
                 "../trained_models/rna_adt_transformer_models_20250922_115253.pth",
@@ -115,8 +123,11 @@ class ADTPredictor:
             dropout=0.6
         ).to(self.device)
 
+        # Get the actual input dimension from the checkpoint
+        transformer_input_dim = checkpoint['transformer_mapping_state_dict']['input_proj.weight'].shape[1]
+        
         transformer_model = TransformerMapping(
-            input_dim=rna_input_dim,
+            input_dim=transformer_input_dim,
             output_dim=adt_output_dim,
             d_model=256,
             nhead=4,
@@ -176,7 +187,10 @@ class ADTPredictor:
             raise FileNotFoundError(f"Transformer model not found at: {transformer_path}")
 
         transformer_checkpoint = torch.load(transformer_path, map_location='cpu')
-        transformer_model = TransformerMapping(**transformer_checkpoint['model_config']).to(self.device)
+        
+        # Use the actual dimensions from the saved model config
+        transformer_config = transformer_checkpoint['model_config'].copy()
+        transformer_model = TransformerMapping(**transformer_config).to(self.device)
         transformer_model.load_state_dict(transformer_checkpoint['state_dict'])
         transformer_model.eval()
 
@@ -220,9 +234,38 @@ class ADTPredictor:
             use_rep = 'X_integrated.cca'
         else:
             print("Computing PCA embeddings")
-            sc.pp.highly_variable_genes(adata_processed, n_top_genes=2000)
-            adata_processed = adata_processed[:, adata_processed.var.highly_variable].copy()
+            
+            # Handle NaN values and ensure data is valid
+            if adata_processed.X is not None:
+                # Check for NaN values
+                if hasattr(adata_processed.X, 'data'):
+                    # Sparse matrix
+                    nan_count = np.isnan(adata_processed.X.data).sum()
+                else:
+                    # Dense matrix
+                    nan_count = np.isnan(adata_processed.X).sum()
+                
+                if nan_count > 0:
+                    print(f"Warning: Found {nan_count} NaN values in data. Filling with 0.")
+                    if hasattr(adata_processed.X, 'data'):
+                        adata_processed.X.data = np.nan_to_num(adata_processed.X.data, nan=0.0)
+                    else:
+                        adata_processed.X = np.nan_to_num(adata_processed.X, nan=0.0)
+            
+            # Try to find highly variable genes with error handling
+            try:
+                sc.pp.highly_variable_genes(adata_processed, n_top_genes=2000)
+                adata_processed = adata_processed[:, adata_processed.var.highly_variable].copy()
+            except Exception as e:
+                print(f"Warning: Could not find highly variable genes: {e}")
+                print("Using all genes for PCA...")
+                # Use all genes if HVG detection fails
+                pass
+            
+            # Scale the data
             sc.pp.scale(adata_processed, max_value=10)
+            
+            # Compute PCA
             sc.tl.pca(adata_processed, n_comps=50, svd_solver="arpack")
             use_rep = 'X_pca'
 
@@ -252,18 +295,45 @@ class ADTPredictor:
         print("Extracting RNA embeddings...")
         with torch.no_grad():
             rna_embeddings = self.rna_gat_model.get_embeddings(pyg_data.x, pyg_data.edge_index)
+            print(f"RNA embeddings shape: {rna_embeddings.shape}")
 
         print("Predicting ADT embeddings...")
         with torch.no_grad():
-            if batch_size is None or batch_size >= rna_embeddings.shape[0]:
-                predicted_adt_embeddings = self.transformer_model(rna_embeddings)
-            else:
-                predicted_adt_embeddings = []
-                for i in range(0, rna_embeddings.shape[0], batch_size):
-                    batch = rna_embeddings[i:i+batch_size]
-                    batch_pred = self.transformer_model(batch)
-                    predicted_adt_embeddings.append(batch_pred)
-                predicted_adt_embeddings = torch.cat(predicted_adt_embeddings, dim=0)
+            try:
+                if batch_size is None or batch_size >= rna_embeddings.shape[0]:
+                    print(f"Processing all {rna_embeddings.shape[0]} samples at once")
+                    predicted_adt_embeddings = self.transformer_model(rna_embeddings)
+                else:
+                    print(f"Processing in batches of {batch_size}")
+                    predicted_adt_embeddings = []
+                    for i in range(0, rna_embeddings.shape[0], batch_size):
+                        batch = rna_embeddings[i:i+batch_size]
+                        batch_pred = self.transformer_model(batch)
+                        predicted_adt_embeddings.append(batch_pred)
+                    predicted_adt_embeddings = torch.cat(predicted_adt_embeddings, dim=0)
+            except RuntimeError as e:
+                if "CUDA" in str(e):
+                    print(f"CUDA error detected: {e}")
+                    print("Falling back to CPU processing...")
+                    # Move transformer model to CPU temporarily
+                    transformer_cpu = self.transformer_model.cpu()
+                    rna_embeddings_cpu = rna_embeddings.cpu()
+                    
+                    if batch_size is None or batch_size >= rna_embeddings_cpu.shape[0]:
+                        predicted_adt_embeddings = transformer_cpu(rna_embeddings_cpu)
+                    else:
+                        predicted_adt_embeddings = []
+                        for i in range(0, rna_embeddings_cpu.shape[0], batch_size):
+                            batch = rna_embeddings_cpu[i:i+batch_size]
+                            batch_pred = transformer_cpu(batch)
+                            predicted_adt_embeddings.append(batch_pred)
+                        predicted_adt_embeddings = torch.cat(predicted_adt_embeddings, dim=0)
+                    
+                    # Move back to original device
+                    predicted_adt_embeddings = predicted_adt_embeddings.to(self.device)
+                    print("✅ CPU processing completed successfully!")
+                else:
+                    raise e
 
         rna_embeddings_np = rna_embeddings.cpu().numpy()
         predicted_adt_embeddings_np = predicted_adt_embeddings.cpu().numpy()

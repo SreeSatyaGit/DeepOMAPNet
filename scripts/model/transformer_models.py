@@ -36,12 +36,20 @@ class TransformerMapping(nn.Module):
         self.output_proj = nn.Linear(d_model, output_dim)
         
     def forward(self, x):
+        # Input projection
         x = self.input_proj(x)
         
+        # Ensure correct shape for transformer (batch_first=True expects [batch, seq, features])
         if len(x.shape) == 2:
+            # Add sequence dimension: [batch, features] -> [batch, 1, features]
             x = x.unsqueeze(1)
-            
+        
+        # Apply transformer encoder
         x = self.transformer_encoder(x)
-        x = self.output_proj(x.squeeze(1))
+        
+        # Remove sequence dimension and project to output
+        if x.shape[1] == 1:
+            x = x.squeeze(1)
+        x = self.output_proj(x)
         
         return x

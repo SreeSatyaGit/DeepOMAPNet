@@ -104,20 +104,5 @@ fine_tuned_model = fine_tune_rna_gat(
 )
 ```
 
-### Data preprocessing:
 
-```python
-from scripts.data_provider import build_pyg_data
-import scanpy as sc
-
-# Preprocess data
-sc.pp.normalize_total(adata, target_sum=1e4)
-sc.pp.log1p(adata)
-sc.pp.highly_variable_genes(adata)
-sc.pp.pca(adata, n_comps=50)
-sc.pp.neighbors(adata)
-
-# Convert to PyTorch Geometric
-pyg_data = build_pyg_data(adata, use_pca=True)
-```
 

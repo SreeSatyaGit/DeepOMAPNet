@@ -1,12 +1,4 @@
-"""
-Predictions.py - Predict ADT embeddings and cell types from RNA data using trained models
 
-This module provides functionality to load trained models and predict ADT embeddings
-and cell types from RNA data, adding the predictions to an AnnData object.
-
-Author: DeepOMAPNet
-Date: 2024
-"""
 
 import os
 import torch
@@ -32,14 +24,7 @@ class ADTPredictor:
     """
 
     def __init__(self, checkpoint_path=None, individual_models_dir=None, device=None):
-        """
-        Initialize the ADT predictor with trained models.
-
-        Args:
-            checkpoint_path (str, optional): Path to the comprehensive model checkpoint.
-            individual_models_dir (str, optional): Path to directory with individual model files.
-            device (str, optional): Device to use ('cuda', 'cpu', or None for auto-detection).
-        """
+        
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.device = torch.device(self.device)
 
@@ -47,21 +32,9 @@ class ADTPredictor:
             checkpoint_path, individual_models_dir
         )
 
-        print(f"✅ ADT Predictor initialized on {self.device}")
-        print(f"   RNA input dim: {self.checkpoint_info['rna_input_dim']}")
-        print(f"   ADT output dim: {self.checkpoint_info['adt_output_dim']}")
 
     def _load_models(self, checkpoint_path=None, individual_models_dir=None):
-        """
-        Load trained models from checkpoint or individual model files.
-
-        Args:
-            checkpoint_path (str, optional): Path to comprehensive checkpoint file.
-            individual_models_dir (str, optional): Path to directory with individual model files.
-
-        Returns:
-            tuple: (rna_gat_model, adt_gat_model, transformer_model, checkpoint_info)
-        """
+        
         if individual_models_dir and os.path.exists(individual_models_dir.strip()):
             return self._load_individual_models(individual_models_dir.strip())
 
@@ -98,7 +71,6 @@ class ADTPredictor:
                     "individual_models directory"
                 )
 
-        print(f"Loading models from: {checkpoint_path}")
 
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
 
@@ -153,16 +125,7 @@ class ADTPredictor:
         return rna_gat_model, adt_gat_model, transformer_model, checkpoint_info
 
     def _load_individual_models(self, models_dir):
-        """
-        Load models from individual model files.
-
-        Args:
-            models_dir (str): Directory containing individual model files.
-
-        Returns:
-            tuple: (rna_gat_model, adt_gat_model, transformer_model, checkpoint_info)
-        """
-        print(f"Loading individual models from: {models_dir}")
+        
 
         rna_gat_path = os.path.join(models_dir, 'rna_gat_model.pth')
         if not os.path.exists(rna_gat_path):
@@ -208,32 +171,19 @@ class ADTPredictor:
             'model_type': 'individual_models'
         }
 
-        print("✅ Individual models loaded successfully!")
         return rna_gat_model, adt_gat_model, transformer_model, checkpoint_info
 
     def _preprocess_rna_data(self, adata, use_existing_embeddings=True):
-        """
-        Preprocess RNA data for prediction.
-
-        Args:
-            adata (AnnData): Input RNA data
-            use_existing_embeddings (bool): Whether to use existing embeddings if available
-
-        Returns:
-            tuple: (processed_adata, pyg_data, use_rep)
-        """
+        
         adata_processed = adata.copy()
 
         if 'X_integrated.cca' not in adata_processed.obsm or not use_existing_embeddings:
-            print("Performing basic preprocessing...")
             sc.pp.normalize_total(adata_processed, target_sum=1e4)
             sc.pp.log1p(adata_processed)
 
         if 'X_integrated.cca' in adata_processed.obsm and use_existing_embeddings:
-            print("Using existing integrated.cca embeddings")
             use_rep = 'X_integrated.cca'
         else:
-            print("Computing PCA embeddings")
             
             # Handle NaN values and ensure data is valid
             if adata_processed.X is not None:
@@ -246,20 +196,13 @@ class ADTPredictor:
                     nan_count = np.isnan(adata_processed.X).sum()
                 
                 if nan_count > 0:
-                    print(f"Warning: Found {nan_count} NaN values in data. Filling with 0.")
-                    if hasattr(adata_processed.X, 'data'):
-                        adata_processed.X.data = np.nan_to_num(adata_processed.X.data, nan=0.0)
-                    else:
-                        adata_processed.X = np.nan_to_num(adata_processed.X, nan=0.0)
+                    pass
             
             # Try to find highly variable genes with error handling
             try:
                 sc.pp.highly_variable_genes(adata_processed, n_top_genes=2000)
                 adata_processed = adata_processed[:, adata_processed.var.highly_variable].copy()
             except Exception as e:
-                print(f"Warning: Could not find highly variable genes: {e}")
-                print("Using all genes for PCA...")
-                # Use all genes if HVG detection fails
                 pass
             
             # Scale the data
@@ -277,34 +220,17 @@ class ADTPredictor:
         return adata_processed, pyg_data, use_rep
 
     def predict_adt_embeddings(self, adata, use_existing_embeddings=True, batch_size=None):
-        """
-        Predict ADT embeddings from RNA data.
-
-        Args:
-            adata (AnnData): Input RNA data
-            use_existing_embeddings (bool): Whether to use existing embeddings if available
-            batch_size (int, optional): Batch size for prediction. If None, processes all data at once.
-
-        Returns:
-            tuple: (rna_embeddings, predicted_adt_embeddings)
-        """
-        print(f"Predicting ADT embeddings for {adata.n_obs} cells...")
-
+        
         adata_processed, pyg_data, use_rep = self._preprocess_rna_data(adata, use_existing_embeddings)
 
-        print("Extracting RNA embeddings...")
         with torch.no_grad():
             rna_embeddings = self.rna_gat_model.get_embeddings(pyg_data.x, pyg_data.edge_index)
-            print(f"RNA embeddings shape: {rna_embeddings.shape}")
 
-        print("Predicting ADT embeddings...")
         with torch.no_grad():
             try:
                 if batch_size is None or batch_size >= rna_embeddings.shape[0]:
-                    print(f"Processing all {rna_embeddings.shape[0]} samples at once")
                     predicted_adt_embeddings = self.transformer_model(rna_embeddings)
                 else:
-                    print(f"Processing in batches of {batch_size}")
                     predicted_adt_embeddings = []
                     for i in range(0, rna_embeddings.shape[0], batch_size):
                         batch = rna_embeddings[i:i+batch_size]
@@ -313,9 +239,6 @@ class ADTPredictor:
                     predicted_adt_embeddings = torch.cat(predicted_adt_embeddings, dim=0)
             except RuntimeError as e:
                 if "CUDA" in str(e):
-                    print(f"CUDA error detected: {e}")
-                    print("Falling back to CPU processing...")
-                    # Move transformer model to CPU temporarily
                     transformer_cpu = self.transformer_model.cpu()
                     rna_embeddings_cpu = rna_embeddings.cpu()
                     
@@ -329,38 +252,18 @@ class ADTPredictor:
                             predicted_adt_embeddings.append(batch_pred)
                         predicted_adt_embeddings = torch.cat(predicted_adt_embeddings, dim=0)
                     
-                    # Move back to original device
                     predicted_adt_embeddings = predicted_adt_embeddings.to(self.device)
-                    print("✅ CPU processing completed successfully!")
                 else:
                     raise e
 
         rna_embeddings_np = rna_embeddings.cpu().numpy()
         predicted_adt_embeddings_np = predicted_adt_embeddings.cpu().numpy()
 
-        print(f"✅ Predictions complete!")
-        print(f"   RNA embeddings shape: {rna_embeddings_np.shape}")
-        print(f"   Predicted ADT embeddings shape: {predicted_adt_embeddings_np.shape}")
-
         return rna_embeddings_np, predicted_adt_embeddings_np
 
     def predict_cell_types(self, predicted_adt_embeddings, method='kmeans', n_clusters=None,
                           cell_type_names=None, reference_cell_types=None):
-        """
-        Predict cell types from ADT embeddings.
-
-        Args:
-            predicted_adt_embeddings (np.array): Predicted ADT embeddings
-            method (str): Method for cell type prediction ('kmeans', 'leiden', 'reference')
-            n_clusters (int, optional): Number of clusters for kmeans/leiden
-            cell_type_names (list, optional): Names for predicted cell types
-            reference_cell_types (np.array, optional): Reference cell type labels for mapping
-
-        Returns:
-            tuple: (predicted_cell_types, cell_type_names, confidence_scores)
-        """
-        print(f"Predicting cell types using {method} method...")
-
+        
         if method == 'kmeans':
             from sklearn.cluster import KMeans
 
@@ -405,34 +308,49 @@ class ADTPredictor:
         label_to_name = {label: name for label, name in zip(unique_labels, cell_type_names)}
         predicted_cell_types = [label_to_name[label] for label in predicted_labels]
 
-        print(f"✅ Cell type prediction complete!")
-        print(f"   Number of predicted cell types: {len(unique_labels)}")
-        print(f"   Cell type names: {cell_type_names}")
-
         return predicted_cell_types, cell_type_names, confidence_scores
+
+    def _get_adt_marker_names(self):
+        
+        try:
+            # Try to load one of the training ADT files to get marker names
+            import scanpy as sc
+            
+            # Try different possible paths for ADT training data
+            adt_paths = [
+                "/projects/vanaja_lab/satya/Datasets/ControlADT.h5ad",
+                "/projects/vanaja_lab/satya/Datasets/AMLAADT.h5ad", 
+                "/projects/vanaja_lab/satya/Datasets/AMLBADT.h5ad"
+            ]
+            
+            for adt_path in adt_paths:
+                if os.path.exists(adt_path):
+                    adt_data = sc.read_h5ad(adt_path)
+                    marker_names = adt_data.var_names.tolist()
+                    
+                    expected_dim = self.checkpoint_info['adt_output_dim']
+                    if len(marker_names) == expected_dim:
+                        return marker_names
+                    elif len(marker_names) > expected_dim:
+                        return marker_names[:expected_dim]
+                    else:
+                        generic_names = [f'predicted_adt_{i}' for i in range(expected_dim)]
+                        for i, name in enumerate(marker_names):
+                            if i < expected_dim:
+                                generic_names[i] = name
+                        return generic_names
+            
+            return [f'predicted_adt_{i}' for i in range(self.checkpoint_info['adt_output_dim'])]
+            
+        except Exception as e:
+            return [f'predicted_adt_{i}' for i in range(self.checkpoint_info['adt_output_dim'])]
 
     def add_predictions_to_adata(self, adata, use_existing_embeddings=True,
                                 batch_size=None, save_embeddings=True,
                                 adt_marker_names=None, predict_cell_types=True,
                                 cell_type_method='kmeans', n_clusters=None,
-                                cell_type_names=None):
-        """
-        Add predicted ADT embeddings and cell types to AnnData object.
-
-        Args:
-            adata (AnnData): Input RNA data
-            use_existing_embeddings (bool): Whether to use existing embeddings if available
-            batch_size (int, optional): Batch size for prediction
-            save_embeddings (bool): Whether to save embeddings in obsm
-            adt_marker_names (list, optional): Names for ADT markers. If None, uses generic names.
-            predict_cell_types (bool): Whether to predict cell types
-            cell_type_method (str): Method for cell type prediction
-            n_clusters (int, optional): Number of clusters for cell type prediction
-            cell_type_names (list, optional): Names for predicted cell types
-
-        Returns:
-            AnnData: AnnData object with predicted ADT embeddings and cell types added
-        """
+                                cell_type_names=None, use_actual_marker_names=True):
+        
         rna_embeddings_np, predicted_adt_embeddings_np = self.predict_adt_embeddings(
             adata, use_existing_embeddings, batch_size
         )
@@ -440,7 +358,16 @@ class ADTPredictor:
         adata_with_predictions = adata.copy()
 
         if adt_marker_names is None:
-            adt_marker_names = [f'predicted_adt_{i}' for i in range(predicted_adt_embeddings_np.shape[1])]
+            if use_actual_marker_names:
+                # Get actual ADT marker names from training data
+                actual_marker_names = self._get_adt_marker_names()
+                # Use actual names if available, otherwise use generic names
+                if len(actual_marker_names) == predicted_adt_embeddings_np.shape[1]:
+                    adt_marker_names = [f'predicted_{name}' for name in actual_marker_names]
+                else:
+                    adt_marker_names = [f'predicted_adt_{i}' for i in range(predicted_adt_embeddings_np.shape[1])]
+            else:
+                adt_marker_names = [f'predicted_adt_{i}' for i in range(predicted_adt_embeddings_np.shape[1])]
 
         for i, marker_name in enumerate(adt_marker_names):
             adata_with_predictions.obs[marker_name] = predicted_adt_embeddings_np[:, i]
@@ -455,9 +382,6 @@ class ADTPredictor:
 
             adata_with_predictions.obs['predicted_cell_type'] = predicted_cell_types
             adata_with_predictions.obs['cell_type_confidence'] = confidence_scores
-
-            print(f"✅ Cell type predictions added!")
-            print(f"   Predicted cell types: {len(np.unique(predicted_cell_types))}")
 
         if save_embeddings:
             adata_with_predictions.obsm['X_rna_embeddings'] = rna_embeddings_np
@@ -482,38 +406,14 @@ class ADTPredictor:
 
         adata_with_predictions.uns['prediction_info'] = metadata
 
-        print(f"✅ Predictions added to AnnData object!")
-        print(f"   Added {len(adt_marker_names)} ADT features to obs")
-        if predict_cell_types:
-            print(f"   Added cell type predictions to obs")
-        if save_embeddings:
-            print(f"   Embeddings saved in obsm and uns")
-
         return adata_with_predictions
 
 def predict_adt_from_rna(adata, checkpoint_path=None, individual_models_dir=None,
                         use_existing_embeddings=True, batch_size=None,
                         adt_marker_names=None, device=None, predict_cell_types=True,
-                        cell_type_method='kmeans', n_clusters=None, cell_type_names=None):
-    """
-    Convenience function to predict ADT embeddings and cell types from RNA data.
-
-    Args:
-        adata (AnnData): Input RNA data
-        checkpoint_path (str, optional): Path to comprehensive model checkpoint
-        individual_models_dir (str, optional): Path to directory with individual model files
-        use_existing_embeddings (bool): Whether to use existing embeddings if available
-        batch_size (int, optional): Batch size for prediction
-        adt_marker_names (list, optional): Names for ADT markers
-        device (str, optional): Device to use
-        predict_cell_types (bool): Whether to predict cell types
-        cell_type_method (str): Method for cell type prediction
-        n_clusters (int, optional): Number of clusters for cell type prediction
-        cell_type_names (list, optional): Names for predicted cell types
-
-    Returns:
-        AnnData: AnnData object with predicted ADT embeddings and cell types added to obs
-    """
+                        cell_type_method='kmeans', n_clusters=None, cell_type_names=None,
+                        use_actual_marker_names=True):
+    
     predictor = ADTPredictor(
         checkpoint_path=checkpoint_path,
         individual_models_dir=individual_models_dir,
@@ -528,7 +428,8 @@ def predict_adt_from_rna(adata, checkpoint_path=None, individual_models_dir=None
         predict_cell_types=predict_cell_types,
         cell_type_method=cell_type_method,
         n_clusters=n_clusters,
-        cell_type_names=cell_type_names
+        cell_type_names=cell_type_names,
+        use_actual_marker_names=use_actual_marker_names
     )
 
     return adata_with_predictions

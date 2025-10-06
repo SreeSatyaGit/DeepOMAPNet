@@ -41,7 +41,7 @@ Contains all data-related functionality:
 - `gse116256_loader.py`: GSE116256 dataset loader
 - `gse116256_pipeline.py`: Complete processing pipeline
 
-### 🧠 Model (`model/`)
+### Model (`model/`)
 Contains neural network architectures:
 - **GAT Models**: Graph Attention Network implementations
 - **Transformer Models**: RNA-to-ADT mapping transformers
@@ -50,7 +50,7 @@ Contains neural network architectures:
 - `gat_models.py`: `SimpleGAT` and `GAT` classes
 - `transformer_models.py`: `TransformerMapping` class
 
-### 🏋️ Trainer (`trainer/`)
+###  Trainer (`trainer/`)
 Contains training and prediction functionality:
 - **Model Training**: GAT model training utilities
 - **Fine-tuning**: RNA GAT fine-tuning on new datasets
@@ -141,18 +141,3 @@ from scripts.data_provider.graph_data_builder import build_pyg_data
 from scripts.trainer.adt_predictor import ADTPredictor
 ```
 
-## Benefits of New Structure
-
-1. **Better Organization**: Related functionality is grouped together
-2. **Clearer Dependencies**: Easy to see what depends on what
-3. **Easier Maintenance**: Changes to one module don't affect others
-4. **Better Testing**: Can test modules independently
-5. **Cleaner Imports**: More intuitive import statements
-
-## Development Guidelines
-
-- **Data Provider**: Add new data loaders, preprocessing functions, and utilities
-- **Model**: Add new neural network architectures and model components
-- **Trainer**: Add new training methods, fine-tuning strategies, and prediction pipelines
-
-Each module has its own `__init__.py` file that exports the main functionality, making imports clean and intuitive.

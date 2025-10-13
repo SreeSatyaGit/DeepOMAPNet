@@ -52,9 +52,15 @@ def sparsify_graph(adata, max_edges_per_node=50):
     return adata
 
 def build_pyg_data(adata, use_pca=True, sparsify_large_graphs=True, max_edges_per_node=50):
-    if use_pca and "X_pca" not in adata.obsm:
-        print("Computing PCA first...")
+    print(f"build_pyg_data called with use_pca={use_pca}")
+    print(f"Input adata shape: {adata.shape}")
+    print(f"Available obsm keys: {list(adata.obsm.keys())}")
+    
+    if use_pca:
+        # Always compute PCA with exactly 50 components for consistency
+        print("Computing PCA with exactly 50 components...")
         sc.tl.pca(adata, n_comps=50, svd_solver="arpack")
+        print(f"PCA computed, shape: {adata.obsm['X_pca'].shape}")
 
     if "connectivities" not in adata.obsp:
         print("Computing neighbor graph first...")
@@ -71,7 +77,19 @@ def build_pyg_data(adata, use_pca=True, sparsify_large_graphs=True, max_edges_pe
             print(f"Large graph detected (avg degree: {average_degree:.1f}), applying sparsification...")
             adata = sparsify_graph(adata, max_edges_per_node)
 
-    node_features = adata.obsm["X_pca"] if use_pca else adata.X.toarray()
+    if use_pca:
+        if "X_pca" not in adata.obsm:
+            print("Warning: X_pca not found, computing PCA...")
+            sc.tl.pca(adata, n_comps=50, svd_solver="arpack")
+        node_features = adata.obsm["X_pca"]
+        print(f"Using PCA features, shape: {node_features.shape}")
+    else:
+        # Handle both sparse and dense matrices
+        if sparse.issparse(adata.X):
+            node_features = adata.X.toarray()
+        else:
+            node_features = adata.X
+        print(f"Using raw features, shape: {node_features.shape}")
     node_labels = adata.obs["leiden"].astype(int).to_numpy()
 
     adjacency_matrix = adata.obsp["connectivities"].tocsr()

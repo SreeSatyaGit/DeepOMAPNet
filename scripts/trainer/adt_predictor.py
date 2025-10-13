@@ -175,46 +175,65 @@ class ADTPredictor:
 
     def _preprocess_rna_data(self, adata, use_existing_embeddings=True):
         
+        print(f"Starting preprocessing with use_existing_embeddings={use_existing_embeddings}")
+        print(f"Input data shape: {adata.shape}")
+        print(f"Available obsm keys: {list(adata.obsm.keys())}")
+        
         adata_processed = adata.copy()
 
         if 'X_integrated.cca' not in adata_processed.obsm or not use_existing_embeddings:
+            print("Computing normalization and log transformation...")
             sc.pp.normalize_total(adata_processed, target_sum=1e4)
             sc.pp.log1p(adata_processed)
 
-        if 'X_integrated.cca' in adata_processed.obsm and use_existing_embeddings:
-            use_rep = 'X_integrated.cca'
-        else:
+        # Always compute PCA with exactly 50 components for consistency
+        print("Computing PCA from scratch (always 50 components)...")
+        
+        # Handle NaN values and ensure data is valid
+        if adata_processed.X is not None:
+            # Check for NaN values
+            if hasattr(adata_processed.X, 'data'):
+                # Sparse matrix
+                nan_count = np.isnan(adata_processed.X.data).sum()
+            else:
+                # Dense matrix
+                nan_count = np.isnan(adata_processed.X).sum()
             
-            # Handle NaN values and ensure data is valid
-            if adata_processed.X is not None:
-                # Check for NaN values
-                if hasattr(adata_processed.X, 'data'):
-                    # Sparse matrix
-                    nan_count = np.isnan(adata_processed.X.data).sum()
-                else:
-                    # Dense matrix
-                    nan_count = np.isnan(adata_processed.X).sum()
-                
-                if nan_count > 0:
-                    pass
-            
-            # Try to find highly variable genes with error handling
-            try:
-                sc.pp.highly_variable_genes(adata_processed, n_top_genes=2000)
-                adata_processed = adata_processed[:, adata_processed.var.highly_variable].copy()
-            except Exception as e:
-                pass
-            
-            # Scale the data
-            sc.pp.scale(adata_processed, max_value=10)
-            
-            # Compute PCA
-            sc.tl.pca(adata_processed, n_comps=50, svd_solver="arpack")
-            use_rep = 'X_pca'
+            if nan_count > 0:
+                print(f"Found {nan_count} NaN values")
+        
+        # Try to find highly variable genes with error handling
+        try:
+            print("Finding highly variable genes...")
+            sc.pp.highly_variable_genes(adata_processed, n_top_genes=2000)
+            adata_processed = adata_processed[:, adata_processed.var.highly_variable].copy()
+            print(f"After HVG filtering: {adata_processed.shape}")
+        except Exception as e:
+            print(f"HVG filtering failed: {e}")
+        
+        # Scale the data
+        print("Scaling data...")
+        sc.pp.scale(adata_processed, max_value=10)
+        
+        # Always compute PCA with exactly 50 components
+        print("Computing PCA with exactly 50 components...")
+        sc.tl.pca(adata_processed, n_comps=50, svd_solver="arpack")
+        use_rep = 'X_pca'
+        print(f"PCA computed, shape: {adata_processed.obsm['X_pca'].shape}")
 
+        print(f"Computing neighbors using {use_rep}...")
         sc.pp.neighbors(adata_processed, n_neighbors=15, use_rep=use_rep)
 
+        # Debug: Check what features we're using
+        print(f"Using representation: {use_rep}")
+        if use_rep == 'X_pca':
+            print(f"PCA shape: {adata_processed.obsm['X_pca'].shape}")
+        else:
+            print(f"Raw data shape: {adata_processed.X.shape}")
+        
+        print("Building PyG data...")
         pyg_data = build_pyg_data(adata_processed, use_pca=(use_rep == 'X_pca'))
+        print(f"PyG data features shape: {pyg_data.x.shape}")
         pyg_data = pyg_data.to(self.device)
 
         return adata_processed, pyg_data, use_rep
@@ -261,153 +280,7 @@ class ADTPredictor:
 
         return rna_embeddings_np, predicted_adt_embeddings_np
 
-    def predict_cell_types(self, predicted_adt_embeddings, method='kmeans', n_clusters=None,
-                          cell_type_names=None, reference_cell_types=None):
-        
-        if method == 'kmeans':
-            from sklearn.cluster import KMeans
-
-            if n_clusters is None:
-                n_clusters = min(20, predicted_adt_embeddings.shape[0] // 100)
-
-            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-            predicted_labels = kmeans.fit_predict(predicted_adt_embeddings)
-
-            distances = kmeans.transform(predicted_adt_embeddings)
-            confidence_scores = 1.0 / (1.0 + distances.min(axis=1))
-
-        elif method == 'leiden':
-            temp_adata = ad.AnnData(X=predicted_adt_embeddings)
-            sc.pp.neighbors(temp_adata, n_neighbors=15, use_rep='X')
-            sc.tl.leiden(temp_adata, resolution=1.0)
-            predicted_labels = temp_adata.obs['leiden'].astype(int).values
-
-            cluster_counts = pd.Series(predicted_labels).value_counts()
-            confidence_scores = cluster_counts[predicted_labels].values / len(predicted_labels)
-
-        elif method == 'reference' and reference_cell_types is not None:
-            from sklearn.neighbors import KNeighborsClassifier
-
-            knn = KNeighborsClassifier(n_neighbors=15, weights='distance')
-            knn.fit(predicted_adt_embeddings, reference_cell_types)
-            predicted_labels = knn.predict(predicted_adt_embeddings)
-
-            neighbor_distances, neighbor_indices = knn.kneighbors(predicted_adt_embeddings)
-            confidence_scores = 1.0 / (1.0 + neighbor_distances.mean(axis=1))
-
-        else:
-            raise ValueError(f"Unknown method: {method}")
-
-        if cell_type_names is None:
-            unique_labels = np.unique(predicted_labels)
-            if method == 'reference' and reference_cell_types is not None:
-                cell_type_names = [f"CellType_{label}" for label in unique_labels]
-            else:
-                cell_type_names = [f"Cluster_{label}" for label in unique_labels]
-
-        label_to_name = {label: name for label, name in zip(unique_labels, cell_type_names)}
-        predicted_cell_types = [label_to_name[label] for label in predicted_labels]
-
-        return predicted_cell_types, cell_type_names, confidence_scores
-
-    def _get_adt_marker_names(self):
-        
-        try:
-            # Try to load one of the training ADT files to get marker names
-            import scanpy as sc
-            
-            # Try different possible paths for ADT training data
-            adt_paths = [
-                "/projects/vanaja_lab/satya/Datasets/ControlADT.h5ad",
-                "/projects/vanaja_lab/satya/Datasets/AMLAADT.h5ad", 
-                "/projects/vanaja_lab/satya/Datasets/AMLBADT.h5ad"
-            ]
-            
-            for adt_path in adt_paths:
-                if os.path.exists(adt_path):
-                    adt_data = sc.read_h5ad(adt_path)
-                    marker_names = adt_data.var_names.tolist()
-                    
-                    expected_dim = self.checkpoint_info['adt_output_dim']
-                    if len(marker_names) == expected_dim:
-                        return marker_names
-                    elif len(marker_names) > expected_dim:
-                        return marker_names[:expected_dim]
-                    else:
-                        generic_names = [f'predicted_adt_{i}' for i in range(expected_dim)]
-                        for i, name in enumerate(marker_names):
-                            if i < expected_dim:
-                                generic_names[i] = name
-                        return generic_names
-            
-            return [f'predicted_adt_{i}' for i in range(self.checkpoint_info['adt_output_dim'])]
-            
-        except Exception as e:
-            return [f'predicted_adt_{i}' for i in range(self.checkpoint_info['adt_output_dim'])]
-
-    def add_predictions_to_adata(self, adata, use_existing_embeddings=True,
-                                batch_size=None, save_embeddings=True,
-                                adt_marker_names=None, predict_cell_types=True,
-                                cell_type_method='kmeans', n_clusters=None,
-                                cell_type_names=None, use_actual_marker_names=True):
-        
-        rna_embeddings_np, predicted_adt_embeddings_np = self.predict_adt_embeddings(
-            adata, use_existing_embeddings, batch_size
-        )
-
-        adata_with_predictions = adata.copy()
-
-        if adt_marker_names is None:
-            if use_actual_marker_names:
-                # Get actual ADT marker names from training data
-                actual_marker_names = self._get_adt_marker_names()
-                # Use actual names if available, otherwise use generic names
-                if len(actual_marker_names) == predicted_adt_embeddings_np.shape[1]:
-                    adt_marker_names = [f'predicted_{name}' for name in actual_marker_names]
-                else:
-                    adt_marker_names = [f'predicted_adt_{i}' for i in range(predicted_adt_embeddings_np.shape[1])]
-            else:
-                adt_marker_names = [f'predicted_adt_{i}' for i in range(predicted_adt_embeddings_np.shape[1])]
-
-        for i, marker_name in enumerate(adt_marker_names):
-            adata_with_predictions.obs[marker_name] = predicted_adt_embeddings_np[:, i]
-
-        if predict_cell_types:
-            predicted_cell_types, cell_type_names, confidence_scores = self.predict_cell_types(
-                predicted_adt_embeddings_np,
-                method=cell_type_method,
-                n_clusters=n_clusters,
-                cell_type_names=cell_type_names
-            )
-
-            adata_with_predictions.obs['predicted_cell_type'] = predicted_cell_types
-            adata_with_predictions.obs['cell_type_confidence'] = confidence_scores
-
-        if save_embeddings:
-            adata_with_predictions.obsm['X_rna_embeddings'] = rna_embeddings_np
-            adata_with_predictions.obsm['X_predicted_adt_embeddings'] = predicted_adt_embeddings_np
-            adata_with_predictions.uns['predicted_adt_data'] = predicted_adt_embeddings_np
-
-        metadata = {
-            'model_checkpoint': self.checkpoint_info['checkpoint_path'],
-            'rna_embedding_dim': rna_embeddings_np.shape[1],
-            'adt_embedding_dim': predicted_adt_embeddings_np.shape[1],
-            'prediction_timestamp': datetime.now().isoformat(),
-            'adt_marker_names': adt_marker_names,
-            'device_used': str(self.device)
-        }
-
-        if predict_cell_types:
-            metadata.update({
-                'cell_type_method': cell_type_method,
-                'n_predicted_cell_types': len(np.unique(predicted_cell_types)),
-                'cell_type_names': cell_type_names
-            })
-
-        adata_with_predictions.uns['prediction_info'] = metadata
-
-        return adata_with_predictions
-
+   
 def predict_adt_from_rna(adata, checkpoint_path=None, individual_models_dir=None,
                         use_existing_embeddings=True, batch_size=None,
                         adt_marker_names=None, device=None, predict_cell_types=True,

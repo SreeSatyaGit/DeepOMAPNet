@@ -11,13 +11,83 @@ import torch.nn.functional as F
 import numpy as np
 import math
 from typing import Dict, Tuple, Optional, Union
-from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error, accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 from scipy.stats import pearsonr, spearmanr
+
+
+def compute_multi_task_loss(adt_pred, adt_target, aml_pred, aml_target, 
+                           adt_weight=1.0, classification_weight=1.0):
+    """
+    Compute combined loss for both ADT prediction and AML classification tasks
+    
+    Args:
+        adt_pred: ADT predictions [N, num_markers]
+        adt_target: ADT targets [N, num_markers] 
+        aml_pred: AML predictions [N, 1]
+        aml_target: AML labels [N] (0=Normal, 1=AML)
+        adt_weight: Weight for ADT regression loss
+        classification_weight: Weight for classification loss
+    
+    Returns:
+        total_loss: Combined weighted loss
+        adt_loss: ADT regression loss
+        aml_loss: AML classification loss
+    """
+    # ADT regression loss (MSE)
+    adt_loss = F.mse_loss(adt_pred, adt_target)
+    
+    # AML classification loss (Binary Cross-Entropy with logits)
+    aml_loss = F.binary_cross_entropy_with_logits(
+        aml_pred.squeeze(), aml_target.float()
+    )
+    
+    # Combined loss
+    total_loss = adt_weight * adt_loss + classification_weight * aml_loss
+    
+    return total_loss, adt_loss, aml_loss
+
+
+def compute_classification_metrics(aml_pred, aml_target):
+    """
+    Compute classification metrics for AML prediction
+    
+    Args:
+        aml_pred: AML predictions [N, 1] (logits)
+        aml_target: AML labels [N] (0=Normal, 1=AML)
+    
+    Returns:
+        metrics: Dictionary of classification metrics
+    """
+    # Convert logits to probabilities
+    aml_probs = torch.sigmoid(aml_pred).cpu().numpy().squeeze()
+    aml_pred_binary = (aml_probs > 0.5).astype(int)
+    aml_target_np = aml_target.cpu().numpy()
+    
+    # Compute metrics
+    accuracy = accuracy_score(aml_target_np, aml_pred_binary)
+    precision = precision_score(aml_target_np, aml_pred_binary, zero_division=0)
+    recall = recall_score(aml_target_np, aml_pred_binary, zero_division=0)
+    f1 = f1_score(aml_target_np, aml_pred_binary, zero_division=0)
+    
+    # AUC-ROC (handle case where all labels are the same)
+    try:
+        auc_roc = roc_auc_score(aml_target_np, aml_probs)
+    except ValueError:
+        auc_roc = 0.5  # Random classifier performance
+    
+    return {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1_score': f1,
+        'auc_roc': auc_roc
+    }
 
 
 def train_gat_transformer_fusion(
     rna_data,
     adt_data,
+    aml_labels=None,  # AML classification labels (0=Normal, 1=AML)
     rna_anndata=None,  # AnnData object for RNA preprocessing
     adt_anndata=None,  # AnnData object for ADT preprocessing
     epochs: int = 200,
@@ -28,6 +98,8 @@ def train_gat_transformer_fusion(
     val_fraction: float = 0.1,
     learning_rate: float = 1e-3,
     weight_decay: float = 1e-4,
+    adt_weight: float = 1.0,  # Weight for ADT regression loss
+    classification_weight: float = 1.0,  # Weight for AML classification loss
     dropout_rate: float = 0.4,
     hidden_channels: int = 96,
     num_heads: int = 8,
@@ -73,6 +145,15 @@ def train_gat_transformer_fusion(
     torch.manual_seed(seed)
     np.random.seed(seed)
     
+    # Clear GPU memory before starting
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        # Set memory fraction to prevent OOM - more aggressive
+        torch.cuda.set_per_process_memory_fraction(0.5)
+        print(f"GPU memory fraction set to 50%")
+    
     # Set device
     device = torch.device('cuda' if torch.cuda.is_available() and not use_cpu_fallback else 'cpu')
     print(f"Using device: {device}")
@@ -105,24 +186,76 @@ def train_gat_transformer_fusion(
     # Preprocess ADT data
     adt_mean, adt_std = _preprocess_adt_data(adt_data, adt_anndata)
     
+    # Process AML labels efficiently and split according to data splits
+    if aml_labels is not None:
+        # Convert to numpy first to avoid GPU memory issues during processing
+        if isinstance(aml_labels, torch.Tensor):
+            aml_labels_np = aml_labels.cpu().numpy()
+        else:
+            aml_labels_np = np.array(aml_labels)
+        
+        # Count labels efficiently on CPU
+        normal_count = np.sum(aml_labels_np == 0)
+        aml_count = np.sum(aml_labels_np == 1)
+        
+        print(f"AML labels processed: {aml_labels_np.shape}, "
+              f"Normal: {normal_count}, AML: {aml_count}")
+        
+        # Split AML labels according to the same train/val/test splits
+        aml_labels_train = aml_labels_np[train_mask.cpu().numpy()]
+        aml_labels_val = aml_labels_np[val_mask.cpu().numpy()]
+        aml_labels_test = aml_labels_np[test_mask.cpu().numpy()]
+        
+        # Count labels in each split
+        train_normal = np.sum(aml_labels_train == 0)
+        train_aml = np.sum(aml_labels_train == 1)
+        val_normal = np.sum(aml_labels_val == 0)
+        val_aml = np.sum(aml_labels_val == 1)
+        test_normal = np.sum(aml_labels_test == 0)
+        test_aml = np.sum(aml_labels_test == 1)
+        
+        print(f"AML labels split — train: {len(aml_labels_train)} (Normal: {train_normal}, AML: {train_aml}), "
+              f"val: {len(aml_labels_val)} (Normal: {val_normal}, AML: {val_aml}), "
+              f"test: {len(aml_labels_test)} (Normal: {test_normal}, AML: {test_aml})")
+        
+        # Keep as numpy array for now, will convert to tensor later
+        aml_labels = aml_labels_np
+    else:
+        print("⚠️ No AML labels provided - will train ADT prediction only")
+    
     # Update output dimension after preprocessing
     adt_output_dim = adt_data.x.size(1)
     print(f"Updated ADT output dimension after preprocessing: {adt_output_dim}")
 
-    # Initialize model with correct dimensions
+    # Initialize model with reduced dimensions for GPU memory
     model = _initialize_model(
-        rna_input_dim, adt_output_dim, hidden_channels, num_heads,
-        num_attention_heads, num_layers, dropout_rate, device
+        rna_input_dim, adt_output_dim, 
+        hidden_channels=min(hidden_channels, 32),  # Cap at 32 for GPU memory
+        num_heads=min(num_heads, 2),  # Cap at 2
+        num_attention_heads=min(num_attention_heads, 2),  # Cap at 2
+        num_layers=min(num_layers, 1),  # Cap at 1
+        dropout_rate=dropout_rate, device=device
     )
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
-    # Move data to device
+    # Clear memory before moving data
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    
+    # Move data to device with memory management
     rna_data, adt_data, device = _move_data_to_device(rna_data, adt_data, model, device)
     
     # Move normalization tensors to device
     adt_mean = adt_mean.to(device)
     adt_std = adt_std.to(device)
+    
+    # Convert AML labels to tensor and move to device efficiently
+    if aml_labels is not None:
+        # Convert to tensor on CPU first, then move to device
+        aml_labels = torch.tensor(aml_labels, dtype=torch.float32, device=device)
+        print(f"AML labels moved to {device}: {aml_labels.shape}")
 
     # Compute graph statistics for positional encoding
     node_degrees_rna, clustering_coeffs_rna = _compute_graph_statistics(rna_data.edge_index, num_nodes)
@@ -138,18 +271,18 @@ def train_gat_transformer_fusion(
 
     # Training loop
     training_history = _run_training_loop(
-        model, rna_data, adt_data, optimizer, scheduler, criterion, scaler,
+        model, rna_data, adt_data, aml_labels, optimizer, scheduler, criterion, scaler,
         node_degrees_rna, node_degrees_adt, clustering_coeffs_rna, clustering_coeffs_adt,
-        adt_mean, adt_std, epochs, early_stopping_patience, use_mixed_precision, device
+        adt_mean, adt_std, adt_weight, classification_weight, epochs, early_stopping_patience, use_mixed_precision, device
     )
 
     # Final evaluation
-    _print_final_metrics(model, rna_data, adt_data, adt_mean, adt_std, 
+    _print_final_metrics(model, rna_data, adt_data, aml_labels, adt_mean, adt_std, 
                         node_degrees_rna, node_degrees_adt, 
                         clustering_coeffs_rna, clustering_coeffs_adt,
                         use_mixed_precision, device)
 
-    return model, rna_data, adt_data, training_history
+    return model, rna_data, adt_data, training_history,adt_mean, adt_std, node_degrees_rna, node_degrees_adt, clustering_coeffs_rna, clustering_coeffs_adt
 
 
 def _create_data_splits(
@@ -339,20 +472,61 @@ def _preprocess_adt_data(adt_data, adt_anndata=None) -> Tuple[torch.Tensor, torc
 
 
 def _move_data_to_device(rna_data, adt_data, model, device):
-    """Move data to the specified device with OOM fallback."""
-    try:
+    """Move data to the specified device with aggressive GPU memory management."""
+    if device.type == "cuda":
+        # Clear memory before moving data
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        
+        # Try to move data in smaller chunks to avoid OOM
+        try:
+            # Move model first
+            model = model.to(device)
+            print(f"Model moved to {device}")
+            
+            # Move RNA data
+            rna_data = rna_data.to(device)
+            print(f"RNA data moved to {device}")
+            
+            # Clear cache before moving ADT data
+            torch.cuda.empty_cache()
+            
+            # Move ADT data
+            adt_data = adt_data.to(device)
+            print(f"ADT data moved to {device}")
+            
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                print("⚠️ GPU OOM during data movement, trying memory optimization...")
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                
+                # Try with even more aggressive memory management
+                torch.cuda.set_per_process_memory_fraction(0.3)  # Reduce to 30%
+                print("🔄 Reduced GPU memory fraction to 30%")
+                
+                try:
+                    # Retry with reduced memory
+                    model = model.to(device)
+                    rna_data = rna_data.to(device)
+                    adt_data = adt_data.to(device)
+                    print(f"✅ Data successfully moved to {device} with reduced memory")
+                except RuntimeError as e2:
+                    if "out of memory" in str(e2).lower():
+                        print("❌ Still OOM, falling back to CPU.")
+                        device = torch.device('cpu')
+                        model = model.cpu()
+                        rna_data = rna_data.cpu()
+                        adt_data = adt_data.cpu()
+                    else:
+                        raise e2
+            else:
+                raise e
+    else:
+        # CPU device - no special handling needed
         rna_data = rna_data.to(device)
         adt_data = adt_data.to(device)
         print(f"Data moved to {device}")
-    except RuntimeError as e:
-        if "out of memory" in str(e).lower() and device.type == "cuda":
-            print("GPU OOM → falling back to CPU.")
-            device = torch.device('cpu')
-            model = model.cpu()
-            rna_data = rna_data.cpu()
-            adt_data = adt_data.cpu()
-        else:
-            raise e
     
     return rna_data, adt_data, device
 
@@ -376,9 +550,9 @@ def _setup_training_components(model, learning_rate, weight_decay, use_mixed_pre
 
 
 def _run_training_loop(
-    model, rna_data, adt_data, optimizer, scheduler, criterion, scaler,
+    model, rna_data, adt_data, aml_labels, optimizer, scheduler, criterion, scaler,
     node_degrees_rna, node_degrees_adt, clustering_coeffs_rna, clustering_coeffs_adt,
-    adt_mean, adt_std, epochs, early_stopping_patience, use_mixed_precision, device
+    adt_mean, adt_std, adt_weight, classification_weight, epochs, early_stopping_patience, use_mixed_precision, device
 ) -> Dict:
     """Run the main training loop."""
     print("Starting training...")
@@ -387,47 +561,65 @@ def _run_training_loop(
     best_state = None
     bad_epochs = 0
     
+    # Global flag to disable mixed precision after first error
+    mixed_precision_disabled = False
+    
     training_history = {
-        "epoch": [], "train_loss": [], "reg_loss": [], 
-        "val_MSE": [], "val_R2": [], "test_MSE": [], "test_R2": []
+        "epoch": [], "train_loss": [], "reg_loss": [], "aml_loss": [],
+        "val_MSE": [], "val_R2": [], "test_MSE": [], "test_R2": [],
+        "val_AML_Accuracy": [], "val_AML_F1": [], "test_AML_Accuracy": [], "test_AML_F1": []
     }
 
     for epoch in range(1, epochs + 1):
-        # Training step
-        train_loss, reg_loss = _training_step(
-            model, rna_data, adt_data, optimizer, criterion, scaler,
+        # Training step - use global mixed precision flag
+        current_mixed_precision = use_mixed_precision and not mixed_precision_disabled
+        adt_loss, reg_loss, aml_loss = _training_step(
+            model, rna_data, adt_data, aml_labels, optimizer, criterion, scaler,
             node_degrees_rna, node_degrees_adt, clustering_coeffs_rna, clustering_coeffs_adt,
-            adt_mean, adt_std, epoch, epochs, use_mixed_precision, device
+            adt_mean, adt_std, adt_weight, classification_weight, epoch, epochs, current_mixed_precision, device
         )
+        
+        # Check if mixed precision was disabled during this step
+        if not current_mixed_precision and use_mixed_precision:
+            mixed_precision_disabled = True
+            if epoch == 1:  # Only print once at the beginning
+                print("ℹ️ Mixed precision disabled due to compatibility issues - using full precision")
         
         # Evaluation and logging
         if epoch % 10 == 0 or epoch == 1 or epoch == epochs:
             torch.cuda.empty_cache()
             val_metrics = _evaluate_model(
-                model, rna_data, adt_data, adt_mean, adt_std,
+                model, rna_data, adt_data, aml_labels, adt_mean, adt_std,
                 node_degrees_rna, node_degrees_adt, clustering_coeffs_rna, clustering_coeffs_adt,
-                rna_data.val_mask, use_mixed_precision, device
+                rna_data.val_mask, current_mixed_precision, device
             )
             test_metrics = _evaluate_model(
-                model, rna_data, adt_data, adt_mean, adt_std,
+                model, rna_data, adt_data, aml_labels, adt_mean, adt_std,
                 node_degrees_rna, node_degrees_adt, clustering_coeffs_rna, clustering_coeffs_adt,
-                rna_data.test_mask, use_mixed_precision, device
+                rna_data.test_mask, current_mixed_precision, device
             )
 
             # Update history
             training_history["epoch"].append(epoch)
-            training_history["train_loss"].append(train_loss)
+            training_history["train_loss"].append(adt_loss)
             training_history["reg_loss"].append(reg_loss)
+            training_history["aml_loss"].append(aml_loss)
             training_history["val_MSE"].append(val_metrics["MSE"])
             training_history["val_R2"].append(val_metrics["R2"])
             training_history["test_MSE"].append(test_metrics["MSE"])
             training_history["test_R2"].append(test_metrics["R2"])
+            training_history["val_AML_Accuracy"].append(val_metrics["AML_Accuracy"])
+            training_history["val_AML_F1"].append(val_metrics["AML_F1"])
+            training_history["test_AML_Accuracy"].append(test_metrics["AML_Accuracy"])
+            training_history["test_AML_F1"].append(test_metrics["AML_F1"])
 
             # Print progress
             print(f"Epoch {epoch:03d} | "
-                  f"TrainLoss {train_loss:.6f} RegLoss {reg_loss:.6f} | "
+                  f"ADT Loss {adt_loss:.6f} AML Loss {aml_loss:.6f} Reg Loss {reg_loss:.6f} | "
                   f"Val MSE {val_metrics['MSE']:.6f} R² {val_metrics['R2']:.4f} | "
-                  f"Test MSE {test_metrics['MSE']:.6f} R² {test_metrics['R2']:.4f}")
+                  f"Test MSE {test_metrics['MSE']:.6f} R² {test_metrics['R2']:.4f} | "
+                  f"Val AML Acc {val_metrics['AML_Accuracy']:.3f} F1 {val_metrics['AML_F1']:.3f} | "
+                  f"Test AML Acc {test_metrics['AML_Accuracy']:.3f} F1 {test_metrics['AML_F1']:.3f}")
 
             # Update scheduler and check early stopping
             scheduler.step(val_metrics["MSE"])
@@ -452,84 +644,158 @@ def _run_training_loop(
 
 
 def _training_step(
-    model, rna_data, adt_data, optimizer, criterion, scaler,
+    model, rna_data, adt_data, aml_labels, optimizer, criterion, scaler,
     node_degrees_rna, node_degrees_adt, clustering_coeffs_rna, clustering_coeffs_adt,
-    adt_mean, adt_std, epoch, epochs, use_mixed_precision, device
-) -> Tuple[float, float]:
+    adt_mean, adt_std, adt_weight, classification_weight, epoch, epochs, use_mixed_precision, device
+) -> Tuple[float, float, float]:
     """Perform one training step."""
     model.train()
     optimizer.zero_grad(set_to_none=True)
     
-    with torch.cuda.amp.autocast(enabled=(use_mixed_precision and device.type == "cuda")):
-        # Forward pass
-        y_pred, _ = model(
-            x=rna_data.x,
-            edge_index_rna=rna_data.edge_index,
-            edge_index_adt=adt_data.edge_index if hasattr(adt_data, 'edge_index') else None,
-            node_degrees_rna=node_degrees_rna,
-            node_degrees_adt=node_degrees_adt,
-            clustering_coeffs_rna=clustering_coeffs_rna,
-            clustering_coeffs_adt=clustering_coeffs_adt
-        )
+    # Clear GPU cache before training step
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    
+    try:
+        with torch.cuda.amp.autocast(enabled=(use_mixed_precision and device.type == "cuda")):
+            # Forward pass
+            adt_pred, aml_pred, _ = model(
+                x=rna_data.x,
+                edge_index_rna=rna_data.edge_index,
+                edge_index_adt=adt_data.edge_index if hasattr(adt_data, 'edge_index') else None,
+                node_degrees_rna=node_degrees_rna,
+                node_degrees_adt=node_degrees_adt,
+                clustering_coeffs_rna=clustering_coeffs_rna,
+                clustering_coeffs_adt=clustering_coeffs_adt
+            )
         
-        # Compute losses
-        main_loss = criterion(y_pred[rna_data.train_mask], adt_data.x[rna_data.train_mask])
+        # Get training masks
+        train_mask = rna_data.train_mask
+        
+        # Compute multi-task loss
+        if aml_labels is not None:
+            total_loss, adt_loss, aml_loss = compute_multi_task_loss(
+                adt_pred[train_mask], adt_data.x[train_mask],
+                aml_pred[train_mask], aml_labels[train_mask],
+                adt_weight, classification_weight
+            )
+        else:
+            # Fallback to ADT-only loss if no AML labels
+            adt_loss = criterion(adt_pred[train_mask], adt_data.x[train_mask])
+            aml_loss = torch.tensor(0.0, device=device)
+            total_loss = adt_loss
+        
         reg_loss = model.get_total_reg_loss()
         
         # Dynamic regularization scaling
         reg_lambda = 0.05 * (1 - epoch / epochs)
-        total_loss = main_loss + reg_lambda * reg_loss
+        total_loss = total_loss + reg_lambda * reg_loss
+        
+        # Backward pass
+        scaler.scale(total_loss).backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        scaler.step(optimizer)
+        scaler.update()
+        
+    except RuntimeError as e:
+        if "out of memory" in str(e).lower() and device.type == "cuda":
+            print(f"⚠️ GPU OOM during training step {epoch}, clearing cache and retrying...")
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            # Fallback to CPU for this step
+            device = torch.device('cpu')
+            model = model.cpu()
+            rna_data = rna_data.cpu()
+            adt_data = adt_data.cpu()
+            aml_labels = aml_labels.cpu() if aml_labels is not None else None
+            adt_mean = adt_mean.cpu()
+            adt_std = adt_std.cpu()
+            node_degrees_rna = node_degrees_rna.cpu()
+            node_degrees_adt = node_degrees_adt.cpu()
+            clustering_coeffs_rna = clustering_coeffs_rna.cpu()
+            clustering_coeffs_adt = clustering_coeffs_adt.cpu()
+            print("🔄 Switched to CPU training due to GPU OOM")
+            # Retry the training step on CPU
+            return _training_step(
+                model, rna_data, adt_data, aml_labels, optimizer, criterion, scaler,
+                node_degrees_rna, node_degrees_adt, clustering_coeffs_rna, clustering_coeffs_adt,
+                adt_mean, adt_std, adt_weight, classification_weight, epoch, epochs, False, device
+            )
+        elif "Found dtype Float but expected Half" in str(e) or "dtype" in str(e).lower():
+            # Silently disable mixed precision and retry (no warning message)
+            return _training_step(
+                model, rna_data, adt_data, aml_labels, optimizer, criterion, scaler,
+                node_degrees_rna, node_degrees_adt, clustering_coeffs_rna, clustering_coeffs_adt,
+                adt_mean, adt_std, adt_weight, classification_weight, epoch, epochs, False, device
+            )
+        else:
+            raise e
     
-    # Backward pass
-    scaler.scale(total_loss).backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-    scaler.step(optimizer)
-    scaler.update()
-    
-    return float(main_loss.item()), float(reg_loss.item())
+    return float(adt_loss.item()), float(reg_loss.item()), float(aml_loss.item())
 
 
 def _evaluate_model(
-    model, rna_data, adt_data, adt_mean, adt_std,
+    model, rna_data, adt_data, aml_labels, adt_mean, adt_std,
     node_degrees_rna, node_degrees_adt, clustering_coeffs_rna, clustering_coeffs_adt,
     mask, use_mixed_precision, device
 ) -> Dict[str, float]:
     """Evaluate model on a specific data split."""
     if mask.sum().item() == 0:
-        return {k: float('nan') for k in ["MSE", "RMSE", "MAE", "R2", "MeanPearson", "MeanSpearman"]}
+        return {k: float('nan') for k in ["MSE", "RMSE", "MAE", "R2", "MeanPearson", "MeanSpearman", 
+                                         "AML_Accuracy", "AML_Precision", "AML_Recall", "AML_F1", "AML_AUC"]}
     
     model.eval()
-    with torch.inference_mode(), torch.cuda.amp.autocast(enabled=(use_mixed_precision and device.type == "cuda")):
-        # Forward pass
-        y_pred, _ = model(
-            x=rna_data.x,
-            edge_index_rna=rna_data.edge_index,
-            edge_index_adt=adt_data.edge_index if hasattr(adt_data, 'edge_index') else None,
-            node_degrees_rna=node_degrees_rna,
-            node_degrees_adt=node_degrees_adt,
-            clustering_coeffs_rna=clustering_coeffs_rna,
-            clustering_coeffs_adt=clustering_coeffs_adt
-        )
-        
-        # Denormalize predictions and targets
-        y_pred_denorm = y_pred[mask] * adt_std + adt_mean
-        y_target = adt_data.x[mask] * adt_std + adt_mean
-        
-        # Convert to numpy for metrics
-        y_target_np = y_target.detach().cpu().numpy()
-        y_pred_np = y_pred_denorm.detach().cpu().numpy()
+    try:
+        with torch.inference_mode(), torch.cuda.amp.autocast(enabled=(use_mixed_precision and device.type == "cuda")):
+            # Forward pass
+            adt_pred, aml_pred, _ = model(
+                x=rna_data.x,
+                edge_index_rna=rna_data.edge_index,
+                edge_index_adt=adt_data.edge_index if hasattr(adt_data, 'edge_index') else None,
+                node_degrees_rna=node_degrees_rna,
+                node_degrees_adt=node_degrees_adt,
+                clustering_coeffs_rna=clustering_coeffs_rna,
+                clustering_coeffs_adt=clustering_coeffs_adt
+            )
+    except RuntimeError as e:
+        if "Found dtype Float but expected Half" in str(e) or "dtype" in str(e).lower():
+            # Retry without mixed precision
+            with torch.inference_mode():
+                adt_pred, aml_pred, _ = model(
+                    x=rna_data.x,
+                    edge_index_rna=rna_data.edge_index,
+                    edge_index_adt=adt_data.edge_index if hasattr(adt_data, 'edge_index') else None,
+                    node_degrees_rna=node_degrees_rna,
+                    node_degrees_adt=node_degrees_adt,
+                    clustering_coeffs_rna=clustering_coeffs_rna,
+                    clustering_coeffs_adt=clustering_coeffs_adt
+                )
+        else:
+            raise e
     
-    # Compute metrics
-    mse = mean_squared_error(y_target_np, y_pred_np)
+    # Denormalize ADT predictions and targets
+    adt_pred_denorm = adt_pred[mask] * adt_std + adt_mean
+    adt_target = adt_data.x[mask] * adt_std + adt_mean
+    
+    # Convert to numpy for metrics
+    adt_target_np = adt_target.detach().cpu().numpy()
+    adt_pred_np = adt_pred_denorm.detach().cpu().numpy()
+    
+    # Get AML predictions and targets
+    aml_pred_masked = aml_pred[mask]
+    aml_target_masked = aml_labels[mask] if aml_labels is not None else None
+    
+    # Compute ADT regression metrics
+    mse = mean_squared_error(adt_target_np, adt_pred_np)
     rmse = float(np.sqrt(mse))
-    mae = mean_absolute_error(y_target_np, y_pred_np)
-    r2 = r2_score(y_target_np.reshape(-1), y_pred_np.reshape(-1))
+    mae = mean_absolute_error(adt_target_np, adt_pred_np)
+    r2 = r2_score(adt_target_np.reshape(-1), adt_pred_np.reshape(-1))
     
     # Compute per-marker correlations
     pearson_corrs, spearman_corrs = [], []
-    for j in range(y_target_np.shape[1]):
-        yt = y_target_np[:, j]
-        yp = y_pred_np[:, j]
+    for j in range(adt_target_np.shape[1]):
+        yt = adt_target_np[:, j]
+        yp = adt_pred_np[:, j]
         if np.std(yt) > 0 and np.std(yp) > 0:
             pearson_corrs.append(pearsonr(yt, yp)[0])
             spearman_corrs.append(spearmanr(yt, yp).correlation)
@@ -537,14 +803,32 @@ def _evaluate_model(
     mean_pearson = float(np.nanmean(pearson_corrs)) if pearson_corrs else float('nan')
     mean_spearman = float(np.nanmean(spearman_corrs)) if spearman_corrs else float('nan')
     
+    # Compute AML classification metrics
+    aml_metrics = {}
+    if aml_target_masked is not None:
+        aml_metrics = compute_classification_metrics(aml_pred_masked, aml_target_masked)
+    else:
+        aml_metrics = {
+            'accuracy': float('nan'),
+            'precision': float('nan'),
+            'recall': float('nan'),
+            'f1_score': float('nan'),
+            'auc_roc': float('nan')
+        }
+    
     return {
         "MSE": mse, "RMSE": rmse, "MAE": mae, "R2": r2,
-        "MeanPearson": mean_pearson, "MeanSpearman": mean_spearman
+        "MeanPearson": mean_pearson, "MeanSpearman": mean_spearman,
+        "AML_Accuracy": aml_metrics['accuracy'],
+        "AML_Precision": aml_metrics['precision'],
+        "AML_Recall": aml_metrics['recall'],
+        "AML_F1": aml_metrics['f1_score'],
+        "AML_AUC": aml_metrics['auc_roc']
     }
 
 
 def _print_final_metrics(
-    model, rna_data, adt_data, adt_mean, adt_std,
+    model, rna_data, adt_data, aml_labels, adt_mean, adt_std,
     node_degrees_rna, node_degrees_adt, clustering_coeffs_rna, clustering_coeffs_adt,
     use_mixed_precision, device
 ) -> None:
@@ -559,7 +843,7 @@ def _print_final_metrics(
     
     for split_name, mask in splits:
         metrics = _evaluate_model(
-            model, rna_data, adt_data, adt_mean, adt_std,
+            model, rna_data, adt_data, aml_labels, adt_mean, adt_std,
             node_degrees_rna, node_degrees_adt, clustering_coeffs_rna, clustering_coeffs_adt,
             mask, use_mixed_precision, device
         )
@@ -568,3 +852,10 @@ def _print_final_metrics(
               f"MSE {metrics['MSE']:.6f}  RMSE {metrics['RMSE']:.6f}  MAE {metrics['MAE']:.6f}  "
               f"R² {metrics['R2']:.4f}  r_mean {metrics['MeanPearson']:.3f}  "
               f"ρ_mean {metrics['MeanSpearman']:.3f}")
+        
+        # Print AML classification metrics
+        if not np.isnan(metrics['AML_Accuracy']):
+            print(f"         | "
+                  f"AML Acc {metrics['AML_Accuracy']:.3f}  Precision {metrics['AML_Precision']:.3f}  "
+                  f"Recall {metrics['AML_Recall']:.3f}  F1 {metrics['AML_F1']:.3f}  "
+                  f"AUC {metrics['AML_AUC']:.3f}")

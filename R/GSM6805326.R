@@ -548,8 +548,8 @@ tryCatch({
       h5_file$create_dataset("X", count_matrix, chunk_dims = c(1000, 1000))
       
       # Add metadata
-      h5_file[["obs"]]$create_dataset("index", rownames(GSM6805319@meta.data))
-      h5_file[["var"]]$create_dataset("index", rownames(GSM6805319))
+      h5_file[["obs"]]$create_dataset("index", as.character(rownames(GSM6805319@meta.data)))
+      h5_file[["var"]]$create_dataset("index", as.character(rownames(GSM6805319)))
       
       # Add reductions
       if ("pca" %in% names(GSM6805319@reductions)) {

@@ -638,6 +638,15 @@ class EnhancedGATWithTransformerFusion(torch.nn.Module):
             nn.Linear(hidden_channels, out_channels)
         )
         
+        # AML classification head for binary classification
+        self.classification_head = nn.Sequential(
+            nn.Linear(hidden_channels, hidden_channels // 2),
+            nn.LayerNorm(hidden_channels // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels // 2, 1)  # Binary classification output
+        )
+        
         # Batch normalization for both modalities
         self.batch_norm_rna = nn.BatchNorm1d(hidden_channels)
         self.batch_norm_adt = nn.BatchNorm1d(hidden_channels)
@@ -648,6 +657,12 @@ class EnhancedGATWithTransformerFusion(torch.nn.Module):
     def _init_final_layers(self):
         """Initialize final projection layers with proper scaling"""
         for module in self.final_proj:
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                nn.init.zeros_(module.bias)
+        
+        # Initialize classification head
+        for module in self.classification_head:
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight)
                 nn.init.zeros_(module.bias)
@@ -667,6 +682,7 @@ class EnhancedGATWithTransformerFusion(torch.nn.Module):
             clustering_coeffs_adt: ADT clustering coefficients [N] (optional)
         Returns:
             adt_pred: ADT predictions [N, out_channels]
+            aml_pred: AML classification predictions [N, 1]
             fused_embeddings: Fused embeddings [N, hidden_channels]
             attention_weights: Attention weights (if return_attention=True)
         """
@@ -704,12 +720,15 @@ class EnhancedGATWithTransformerFusion(torch.nn.Module):
         # ADT prediction with fused features
         adt_features = self.gat_adt(fused_embeddings, edge_index_adt)
         
-        # Final prediction through MLP
+        # Final ADT prediction through MLP
         adt_pred = self.final_proj(adt_features)
         
+        # AML classification prediction
+        aml_pred = self.classification_head(adt_features)
+        
         if return_attention:
-            return adt_pred, fused_embeddings, attention_weights
-        return adt_pred, fused_embeddings
+            return adt_pred, aml_pred, fused_embeddings, attention_weights
+        return adt_pred, aml_pred, fused_embeddings
     
     def get_embeddings(self, x, edge_index_rna, edge_index_adt=None,
                        node_degrees_rna=None, node_degrees_adt=None,
@@ -736,6 +755,67 @@ class EnhancedGATWithTransformerFusion(torch.nn.Module):
             )
             return fused_embeddings
     
+    def get_attention_weights(self, x, edge_index_rna, edge_index_adt=None,
+                            node_degrees_rna=None, node_degrees_adt=None,
+                            clustering_coeffs_rna=None, clustering_coeffs_adt=None):
+        """
+        Extract attention weights from all layers for visualization.
+        
+        Args:
+            x: Input features [N, in_channels]
+            edge_index_rna: RNA graph edges [2, E_rna]
+            edge_index_adt: ADT graph edges [2, E_adt] (optional)
+            node_degrees_rna: RNA node degrees [N] (optional)
+            node_degrees_adt: ADT node degrees [N] (optional)
+            clustering_coeffs_rna: RNA clustering coefficients [N] (optional)
+            clustering_coeffs_adt: ADT clustering coefficients [N] (optional)
+        
+        Returns:
+            attention_dict: Dictionary containing attention weights from each layer
+        """
+        attention_dict = {}
+        
+        with torch.no_grad():
+            # RNA embedding path with attention extraction
+            x = F.dropout(x, p=self.dropout, training=False)
+            
+            # First GAT layer
+            x, gat_rna1_attn = self.gat_rna1(x, edge_index_rna, return_attention=True)
+            x = F.elu(x)
+            attention_dict['gat_rna1'] = gat_rna1_attn
+            
+            x = F.dropout(x, p=self.dropout, training=False)
+            
+            # Second GAT layer
+            rna_embeddings, gat_rna2_attn = self.gat_rna2(x, edge_index_rna, return_attention=True)
+            rna_embeddings = F.elu(rna_embeddings)
+            attention_dict['gat_rna2'] = gat_rna2_attn
+            
+            rna_embeddings = self.batch_norm_rna(rna_embeddings)
+            
+            # Initial ADT embeddings from RNA
+            edge_index_adt = edge_index_adt if edge_index_adt is not None else edge_index_rna
+            initial_adt, gat_adt_init_attn = self.gat_adt_init(rna_embeddings, edge_index_adt, return_attention=True)
+            initial_adt = F.elu(initial_adt)
+            attention_dict['gat_adt_init'] = gat_adt_init_attn
+            
+            initial_adt = self.batch_norm_adt(initial_adt)
+            
+            # Multi-modal fusion with attention extraction
+            fused_embeddings, transformer_attn = self.transformer_fusion(
+                rna_embeddings, initial_adt, edge_index_rna, edge_index_adt,
+                node_degrees_rna, node_degrees_adt,
+                clustering_coeffs_rna, clustering_coeffs_adt,
+                return_attention=True
+            )
+            attention_dict['transformer'] = transformer_attn
+            
+            # Final ADT prediction
+            adt_features, gat_adt_attn = self.gat_adt(fused_embeddings, edge_index_adt, return_attention=True)
+            attention_dict['gat_adt'] = gat_adt_attn
+        
+        return attention_dict
+
     def get_total_reg_loss(self):
         """Get total regularization loss from adapters and projection layers"""
         reg_loss = self.transformer_fusion.get_adapter_reg_loss()

@@ -2,7 +2,7 @@
 
 A graph-aware multi-modal neural network that jointly predicts single-cell protein (ADT) abundances and AML status from RNA profiles, demonstrating strong cross-cohort generalization and biologically consistent gene–protein interactions.
 
-## 🧬 Overview
+## Overview
 
 DeepOMAPNet combines Graph Attention Networks (GAT) with Transformer fusion layers to perform two key tasks simultaneously:
 - **ADT Regression**: Predict protein marker abundances from RNA expression

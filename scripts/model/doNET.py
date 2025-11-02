@@ -743,22 +743,22 @@ class GATWithTransformerFusion(torch.nn.Module):
         with torch.no_grad():
             x = F.dropout(x, p=self.dropout, training=False)
             
-            x, gat_rna1_attn = self.gat_rna1(x, edge_index_rna, return_attention=True)
+            x = self.gat_rna1(x, edge_index_rna)
             x = F.elu(x)
-            attention_dict['gat_rna1'] = gat_rna1_attn
+            attention_dict['gat_rna1'] = None
             
             x = F.dropout(x, p=self.dropout, training=False)
             
-            rna_embeddings, gat_rna2_attn = self.gat_rna2(x, edge_index_rna, return_attention=True)
+            rna_embeddings = self.gat_rna2(x, edge_index_rna)
             rna_embeddings = F.elu(rna_embeddings)
-            attention_dict['gat_rna2'] = gat_rna2_attn
+            attention_dict['gat_rna2'] = None
             
             rna_embeddings = self.batch_norm_rna(rna_embeddings)
             
             edge_index_adt = edge_index_adt if edge_index_adt is not None else edge_index_rna
-            initial_adt, gat_adt_init_attn = self.gat_adt_init(rna_embeddings, edge_index_adt, return_attention=True)
+            initial_adt = self.gat_adt_init(rna_embeddings, edge_index_adt)
             initial_adt = F.elu(initial_adt)
-            attention_dict['gat_adt_init'] = gat_adt_init_attn
+            attention_dict['gat_adt_init'] = None
             
             initial_adt = self.batch_norm_adt(initial_adt)
             
@@ -770,8 +770,8 @@ class GATWithTransformerFusion(torch.nn.Module):
             )
             attention_dict['transformer'] = transformer_attn
             
-            adt_features, gat_adt_attn = self.gat_adt(fused_embeddings, edge_index_adt, return_attention=True)
-            attention_dict['gat_adt'] = gat_adt_attn
+            adt_features = self.gat_adt(fused_embeddings, edge_index_adt)
+            attention_dict['gat_adt'] = None
         
         return attention_dict
 

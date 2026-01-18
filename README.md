@@ -1,91 +1,101 @@
-# DeepOMAPNet - File Structure Guide
+# DeepOMAPNet: Graph-Attention Multi-Modal Single-Cell Analysis
 
+---
 
+<p align="center">
+  <img src="https://img.shields.io/badge/Status-Active-brightgreen.svg" alt="Status">
+  <img src="https://img.shields.io/badge/Focus-Bioinformatics_&_Deep_Learning-blue.svg" alt="Focus">
+  <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License">
+</p>
 
-## 📁 Root Directory
+**DeepOMAPNet** is a high-performance deep learning framework designed for integrated multi-modal single-cell analysis (CITE-seq). By combining **Graph Attention Networks (GAT)** with **Cross-Modal Transformer Fusion**, DeepOMAPNet achieves superior accuracy in mapping RNA expression to surface protein (ADT) levels, while simultaneously enabling cell-type identification and disease classification (e.g., AML vs. Normal).
 
-- **`README.md`** - Main documentation with installation, usage, and API reference
-- **`LICENSE`** - License information
-- **`requirements.txt`** - Python package dependencies
-- **`environment.yml`** - Conda environment configuration
-- **`model_architecture.html`** - Visual representation of the model architecture
+---
 
-## 📂 scripts/ - Core Python Modules
+## ✨ Key Features
 
-### Model Architecture (`scripts/model/`)
+- **🧬 Multi-Modal Integration**: Bridging the gap between transcriptomics (RNA) and proteomics (ADT).
+- **🕸️ Graph-Based Learning**: Captures cellular heterogeneity by leveraging k-NN graph topologies.
+- **⚡ Transformer Fusion**: Advanced cross-modal attention mechanism for robust feature alignment.
+- **🎯 Multi-Task Optimization**: Simultaneous training on ADT regression, cell-type classification, and disease diagnosis.
+- **📈 Scalable & Efficient**: Sparse attention layers and automatic mixed-precision (AMP) for large-scale CITE-seq datasets.
+- **🔄 Transfer Learning**: Efficient adapter-based fine-tuning for cross-dataset application.
 
-- **`doNET.py`** - Core model implementation
-  - `GATWithTransformerFusion`: Main model class combining GAT and Transformer layers
-  - `TransformerFusion`: Cross-modal attention between RNA and ADT
-  - `SparseCrossAttentionLayer`: Efficient sparse attention mechanism
-  - `GraphPositionalEncoding`: Graph-aware positional encoding
-  - `AdapterLayer`: Parameter-efficient fine-tuning adapters
+---
 
-### Data Processing (`scripts/data_provider/`)
+## 🚀 Installation & Reproducibility
 
-- **`data_preprocessing.py`** - Data normalization and preparation
-  - `clr_normalize()`: Centered Log-Ratio normalization for ADT data
-  - `zscore_normalize()`: Z-score normalization
-  - `prepare_train_test_anndata()`: Train/test split and preprocessing pipeline
+DeepOMAPNet is developed in Python 3.8 and PyTorch. Follow these steps to set up a reproducible environment.
 
-- **`graph_data_builder.py`** - Graph construction from single-cell data
-  - `build_pyg_data()`: Converts AnnData to PyTorch Geometric format
-  - `sparsify_graph()`: Reduces graph density for memory efficiency
-  - `setup_graph_processing()`: Configures graph parameters based on GPU memory
+### 1. Requirements
+Ensure you have [Conda](https://docs.conda.io/en/latest/) installed.
 
-### Training (`scripts/trainer/`)
+### 2. Environment Setup
+```bash
+# Clone the repository
+git clone https://github.com/SreeSatyaGit/DeepOMAPNet.git
+cd DeepOMAPNet
 
-- **`gat_trainer.py`** - Main training pipeline
-  - `train_gat_transformer_fusion()`: Complete training workflow
-  - Handles multi-task learning (ADT regression + AML classification)
-  - Supports cell type classification
-  - Mixed precision training and early stopping
+# Create and activate environment
+conda env create -f environment.yml
+conda activate deepomapnet
+```
 
-- **`fineTune.py`** - Transfer learning and fine-tuning
-  - `load_and_finetune()`: Load pre-trained model and fine-tune on new data
-  - Handles different ADT marker counts
-  - Supports freezing/unfreezing encoder layers
+Alternatively, install via pip:
+```bash
+pip install -r requirements.txt
+```
 
-### Visualization (`scripts/`)
+---
 
-- **`visualizations.py`** - Plotting functions
-  - UMAP visualizations
-  - ADT marker correlation plots
-  - Gene-protein relationship networks
-  - Attention weight visualizations
+## 📖 Getting Started
 
-## 📂 Tutorials/ - Jupyter Notebooks
+We provide comprehensive tutorials to help you go from raw data to trained models.
 
-- **`Training.ipynb`** - Complete training workflow example
-- **`Test.ipynb`** - Model evaluation and testing
-- **`Finetune.ipynb`** - Fine-tuning pre-trained models on new datasets
-- **`scVI.ipynb`** - Integration with scVI (if applicable)
+### 🏋️ Training
+To train the model on your own CITE-seq data:
+1.  Navigate to `Tutorials/Training.ipynb`.
+2.  Follow the data loading steps (supports `AnnData` objects).
+3.  Execute the training pipeline to generate model weights and performance metrics.
 
-## 📂 R/ - R Scripts (Legacy/Alternative Processing)
+### 🧪 Evaluation
+Use `Tutorials/Test.ipynb` to evaluate a pre-trained model on unseen datasets, generate UMAP visualizations, and compute correlation metrics (Pearson/Spearman).
 
-- **`DataProcessing.R`** - R-based data preprocessing pipeline
-- **`AMLTirated.R`** - AML-specific data processing
-- **`GSM6805326.R`** - Dataset-specific processing
-- **`RefMapping.R`** - Reference mapping utilities
-- **`WNN_Mapping.R`** - Weighted Nearest Neighbor mapping
+### 🔧 Fine-tuning
+For transfer learning on new datasets where modalities might be unaligned, refer to `Tutorials/Finetune.ipynb`.
 
-## 📂 publication_figures/ - Output Visualizations
+---
 
-Contains generated figures and plots from analysis pipelines.
+## 📂 Repository Structure
 
-## 🗂️ Key Data Flow
+| Module | Components |
+| :--- | :--- |
+| **`scripts/model/`** | `doNET.py` (Core GAT + Transformer architecture), Adapters, and Positional Encodings. |
+| **`scripts/data_provider/`** | `data_preprocessing.py` (CLR/Z-score normalization), `graph_data_builder.py` (PyG Graph conversion). |
+| **`scripts/trainer/`** | `gat_trainer.py` (Main training/eval loop), `fineTune.py` (Transfer learning logic). |
+| **`Tutorials/`** | Interactive Jupyter Notebooks for end-to-end workflows. |
+| **`R/`** | Supporting R scripts for WNN mapping and legacy preprocessing. |
+| **`publication_figures/`** | Placeholder for analytical plots and published result figures. |
 
-1. **Data Input** → `data_preprocessing.py` → Normalized AnnData
-2. **Graph Construction** → `graph_data_builder.py` → PyTorch Geometric Data
-3. **Model Definition** → `doNET.py` → `GATWithTransformerFusion`
-4. **Training** → `gat_trainer.py` → Trained model weights
-5. **Fine-tuning** → `fineTune.py` → Adapted model for new data
-6. **Visualization** → `visualizations.py` → Analysis plots
+---
 
-## 🔑 Main Entry Points
+## 📐 Architecture Overview
 
-- **Training**: `scripts/trainer/gat_trainer.py::train_gat_transformer_fusion()`
-- **Fine-tuning**: `scripts/trainer/fineTune.py::load_and_finetune()`
-- **Model**: `scripts/model/doNET.py::GATWithTransformerFusion`
-- **Data Prep**: `scripts/data_provider/data_preprocessing.py::prepare_train_test_anndata()`
+DeepOMAPNet's architecture is built on four pillars:
+1.  **GAT Encoder**: Learns 96-dimensional hidden representations from the gene expression k-NN graph.
+2.  **Positional Encoding**: Integrates graph statistics (degree, clustering coefficients) into the latent space.
+3.  **Cross-Modal Transformer**: Uses multi-head attention to fuse RNA and ADT information.
+4.  **Multi-Task Heads**: Specialized MLP branches for regression (ADT) and classification (AML/Cell-Type).
 
+Detailed diagram: [model_architecture.html](model_architecture.html)
+
+---
+
+---
+
+## ⚖️ License
+
+Distributed under the MIT License. See `LICENSE` for more information.
+
+---
+Developed by **DeepOMAPNet Contributors** | [Link to Paper](https://github.com/SreeSatyaGit/DeepOMAPNet)

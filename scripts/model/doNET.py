@@ -103,8 +103,14 @@ class SparseCrossAttentionLayer(nn.Module):
         Cached per-instance to avoid recomputation each forward.
         """
         if hasattr(self, '_cached_edges'):
-            cached_num_nodes, cached_device, cached_edges = self._cached_edges
-            if cached_num_nodes == num_nodes and cached_device == device:
+            cached_num_nodes, cached_device, cached_ptr, cached_version, cached_shape, cached_edges = self._cached_edges
+            if (
+                cached_num_nodes == num_nodes
+                and cached_device == device
+                and cached_ptr == edge_index.data_ptr()
+                and cached_version == edge_index._version
+                and cached_shape == tuple(edge_index.shape)
+            ):
                 return cached_edges
         
         row, col = edge_index[0], edge_index[1]
@@ -136,7 +142,14 @@ class SparseCrossAttentionLayer(nn.Module):
             row = row[keep_mask]; col = col[keep_mask]
             edge_index_sym = torch.stack([row, col], dim=0)
         
-        self._cached_edges = (num_nodes, device, edge_index_sym)
+        self._cached_edges = (
+            num_nodes,
+            device,
+            edge_index.data_ptr(),
+            edge_index._version,
+            tuple(edge_index.shape),
+            edge_index_sym,
+        )
         return edge_index_sym
     
     def _sparse_attention_vectorized(self, q, k, v, edge_index):
@@ -159,27 +172,25 @@ class SparseCrossAttentionLayer(nn.Module):
         src = edge_index[0]
         tgt = edge_index[1]
         
-        src_rep = src.unsqueeze(0).repeat(nhead, 1)
-        tgt_rep = tgt.unsqueeze(0).repeat(nhead, 1)
-        
-        q_src = q[torch.arange(nhead).unsqueeze(1), src_rep]
-        k_tgt = k[torch.arange(nhead).unsqueeze(1), tgt_rep]
-        v_tgt = v[torch.arange(nhead).unsqueeze(1), tgt_rep]
+        q_src = q[:, src, :]
+        k_tgt = k[:, tgt, :]
+        v_tgt = v[:, tgt, :]
         
         scores = (q_src * k_tgt).sum(dim=-1) * self.scale
-        head_offsets = (torch.arange(nhead, device=device) * (N + 1)).unsqueeze(1)
-        segment_ids = head_offsets + src_rep
+        head_offsets = (torch.arange(nhead, device=device) * N).unsqueeze(1)
+        segment_ids = head_offsets + src.unsqueeze(0)
         attn = segment_softmax(scores.flatten(), segment_ids.flatten())
         attn = attn.view(nhead, -1)
         attn = self.dropout(attn)
-        
-        out = torch.zeros(nhead, N, head_dim, device=device)
+
         attn_exp = attn.unsqueeze(-1)
         contrib = attn_exp * v_tgt
-        
-        for h in range(nhead):
-            out[h] = scatter_add(contrib[h], src, dim=0, dim_size=N)
-        
+
+        flat_src = (head_offsets + src.unsqueeze(0)).reshape(-1)
+        contrib_flat = contrib.reshape(-1, head_dim)
+        out_flat = scatter_add(contrib_flat, flat_src, dim=0, dim_size=nhead * N)
+        out = out_flat.view(nhead, N, head_dim)
+
         return out, None
     
     def forward(self, query, key_value, edge_index=None, node_degrees=None, 
@@ -227,7 +238,7 @@ class SparseCrossAttentionLayer(nn.Module):
         out = out.transpose(0, 1).contiguous().view(N, self.embedding_dim)
         
         out = self.out_proj(out)
-        out = self.norm_out(out + query)
+        out = self.norm_out(out)
         
         if return_attention:
             if attn_weights is None:
@@ -314,7 +325,7 @@ class CrossAttentionLayer(nn.Module):
         out = out.transpose(0, 1).contiguous().view(N, self.embedding_dim)
         
         out = self.out_proj(out)
-        out = self.norm_out(out + query)
+        out = self.norm_out(out)
         
         if return_attention:
             return out, attn_weights
@@ -363,7 +374,7 @@ class AdapterLayer(nn.Module):
     
     def get_l2_reg_loss(self):
         """Compute L2 regularization loss for adapter parameters"""
-        l2_loss = 0.0
+        l2_loss = torch.tensor(0.0, device=self.down.weight.device)
         for param in [self.down.weight, self.up.weight]:
             l2_loss += torch.norm(param, p=2) ** 2
         return self.adapter_l2_reg * l2_loss
@@ -682,8 +693,7 @@ class GATWithTransformerFusion(torch.nn.Module):
         """Dynamically add/enable the cell type head after initialization."""
         self.num_cell_types = int(num_cell_types)
         hidden_channels = self.classification_head[0].in_features
-        p = self.dropout if isinstance(self.dropout, float) else None
-        p = dropout if dropout is not None else (self.dropout.p if isinstance(self.dropout, nn.Dropout) else 0.5)
+        p = dropout if dropout is not None else float(self.dropout)
         self.celltype_head = nn.Sequential(
             nn.Linear(hidden_channels, hidden_channels // 2),
             nn.LayerNorm(hidden_channels // 2),
